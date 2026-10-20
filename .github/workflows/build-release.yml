@@ -1,1 +1,116 @@
 
+name: Build LocalMind APK and EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'LocalMind-Forge-0.3.1-Source-Clean-Verified.zip'
+      - '.github/workflows/build-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-exe:
+    name: Build Windows x64 EXE
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract source
+        shell: pwsh
+        run: |
+          $archive = 'LocalMind-Forge-0.3.1-Source-Clean-Verified.zip'
+          if (-not (Test-Path $archive)) { throw "Upload $archive to the repository root first." }
+          Expand-Archive -LiteralPath $archive -DestinationPath source -Force
+          if (-not (Test-Path 'source/LocalMind-Forge/requirements.txt')) { throw 'Archive structure is invalid.' }
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: source/LocalMind-Forge/requirements.txt
+
+      - name: Install and test
+        working-directory: source/LocalMind-Forge
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+          python -m unittest discover -s tests -v
+
+      - name: Build and package Windows app
+        working-directory: source/LocalMind-Forge
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean LocalMind.spec
+          New-Item -ItemType Directory -Force -Path 'dist/LocalMind/data', 'dist/LocalMind/workspace' | Out-Null
+          if (-not (Test-Path 'dist/LocalMind/LocalMind.exe')) { throw 'LocalMind.exe was not produced.' }
+          Compress-Archive -Path 'dist/LocalMind/*' -DestinationPath 'dist/LocalMind-Windows-x64.zip' -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalMind-Windows-x64
+          path: source/LocalMind-Forge/dist/LocalMind-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  android-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract source
+        shell: bash
+        run: |
+          ARCHIVE='LocalMind-Forge-0.3.1-Source-Clean-Verified.zip'
+          test -s "$ARCHIVE" || { echo "Upload $ARCHIVE to repository root first." >&2; exit 1; }
+          mkdir -p source
+          unzip -q "$ARCHIVE" -d source
+          test -s source/LocalMind-Forge/android/app/build.gradle.kts
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build and verify APK
+        shell: bash
+        run: |
+          gradle --project-dir source/LocalMind-Forge/android --no-daemon --stacktrace assembleDebug
+          APK='source/LocalMind-Forge/android/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          sha256sum "$APK" | tee "$APK.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalMind-Android-APK
+          path: |
+            source/LocalMind-Forge/android/app/build/outputs/apk/debug/app-debug.apk
+            source/LocalMind-Forge/android/app/build/outputs/apk/debug/app-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalMind-Android-Build-Diagnostics
+          path: |
+            source/LocalMind-Forge/android/build/reports/**
+            source/LocalMind-Forge/android/app/build/reports/**
+          if-no-files-found: ignore
+          retention-days: 7
